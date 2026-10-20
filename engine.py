@@ -18,7 +18,8 @@ OPTIONAL = {
     'complete_pass', 'pass_attempt', 'rush_attempt', 'receiver_player_name',
     'rusher_player_name', 'passer_player_name', 'interception', 'fumble_lost',
     'touchdown', 'success', 'game_id', 'play_id', 'air_yards',
-    'pass_length', 'first_down', 'qb_scramble', 'sack'
+    'pass_length', 'first_down', 'qb_scramble', 'sack',
+    'receiving_yards', 'rushing_yards'
 }
 
 class DataQualityError(ValueError):
@@ -40,6 +41,11 @@ def prepare_plays(frame: pd.DataFrame, *, cutoff: str = '2026-10-19', seasons=(2
         df[col] = pd.to_numeric(df[col], errors='coerce')
     for col in OPTIONAL - set(df.columns):
         df[col] = np.nan
+    # These fields measure individual-player production rather than full play gain.
+    # Keep missing data as missing: never replace absent receiving/rushing yards
+    # with total play yards.
+    for col in ('receiving_yards', 'rushing_yards'):
+        df[col] = pd.to_numeric(df[col], errors='coerce')
     cut = pd.Timestamp(cutoff)
     df = df.loc[
         df['season'].isin(seasons)
@@ -175,27 +181,42 @@ def automatic_comparison(df: pd.DataFrame, offense: str, defense: str, *,
 
 
 def player_involvement(df: pd.DataFrame, offense: str, *, season: Optional[int] = None) -> pd.DataFrame:
-    """Observed target/carry involvement. No injury, lineup or player predictions."""
+    """Observed 2026 target/carry usage and player-specific yards on filtered PBP.
+
+    Receiving/rushing yards use nflverse's respective statistical fields, NOT
+    total yards gained on a play. This is a filtered play dataset and cannot be
+    assumed to reconcile exactly to an official full-season box score.
+    """
     season = season or int(df['season'].max())
     sub = df[(df['posteam'] == offense) & (df['season'] == season)].copy()
     counts = []
-    for col, role, condition in [('receiver_player_name', 'Pass targets', 'Dropback / pass'),
-                                 ('rusher_player_name', 'Rushing opportunities', 'Run / scramble')]:
+    for col, role, condition, yard_col in [
+        ('receiver_player_name', 'Pass targets', 'Dropback / pass', 'receiving_yards'),
+        ('rusher_player_name', 'Rushing opportunities', 'Run / scramble', 'rushing_yards'),
+    ]:
         part = sub.loc[(sub['play_type'] == condition) & sub[col].notna()].copy()
         part = part[part[col].astype(str).str.strip().ne('')]
         if part.empty:
             continue
+        # A source without this field gets an explicit missing value, never
+        # a misleading substitute derived from total yards_gained.
+        if yard_col not in part.columns:
+            part[yard_col] = np.nan
+        part[yard_col] = pd.to_numeric(part[yard_col], errors='coerce')
         ct = part.groupby(col, dropna=True).agg(
             Plays=(col, 'count'),
-            Recorded_yards=('yards_gained', 'sum'),
-        ).reset_index().rename(columns={col:'Player','Recorded_yards':'Play yards'})
+            Player_yards=(yard_col, lambda x: x.sum(min_count=1)),
+        ).reset_index().rename(columns={col: 'Player', 'Player_yards': 'Player yards (filtered PBP)'})
         ct['Role'] = role
         ct['Share of recorded opportunities %'] = (ct['Plays'] / len(part) * 100).round(1)
         counts.append(ct)
     if not counts:
-        return pd.DataFrame(columns=['Player','Role','Plays','Play yards','Share of recorded opportunities %'])
+        return pd.DataFrame(columns=[
+            'Player', 'Role', 'Plays', 'Player yards (filtered PBP)',
+            'Share of recorded opportunities %',
+        ])
     return (pd.concat(counts, ignore_index=True)
-            .sort_values(['Role','Plays'], ascending=[True, False]).reset_index(drop=True))
+            .sort_values(['Role', 'Plays'], ascending=[True, False]).reset_index(drop=True))
 
 
 def game_coverage(df: pd.DataFrame, cutoff: str) -> pd.DataFrame:
@@ -209,3 +230,4 @@ def game_coverage(df: pd.DataFrame, cutoff: str) -> pd.DataFrame:
                          str(sub['game_date'].max().date()) if len(sub) else 'â',
                          'Cutoff (exclusive)': cutoff})
     return pd.DataFrame(parts)
+
