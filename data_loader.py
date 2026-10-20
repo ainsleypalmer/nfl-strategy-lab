@@ -12,6 +12,7 @@ COLUMNS = [
     'complete_pass','pass_attempt','rush_attempt','receiver_player_name',
     'rusher_player_name','passer_player_name','interception','fumble_lost',
     'touchdown','success','air_yards','pass_length','first_down','qb_scramble','sack',
+    'receiving_yards','rushing_yards',
 ]
 
 
